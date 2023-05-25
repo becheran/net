@@ -2788,6 +2788,26 @@ func (w *responseWriter) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
+// io.Closer interface
+// TODO: review AB: Should better not use Closer interface.
+// Unclear what this means? In our case it closes the stream, but it could have been the connection itself?
+func (w *responseWriter) Close() error {
+	if w == nil || w.rws == nil || w.rws.stream == nil || w.rws.stream.state == stateIdle || w.rws.stream.state == stateClosed {
+		return fmt.Errorf("stream already closed")
+	}
+	timeout := time.NewTimer(time.Second * 10)
+	defer timeout.Stop()
+	select {
+	case w.rws.conn.closeStreamChan <- w.rws.stream:
+		return nil
+	case <-timeout.C:
+		if w == nil || w.rws == nil || w.rws.stream == nil || w.rws.stream.state == stateIdle || w.rws.stream.state == stateClosed {
+			return fmt.Errorf("stream already closed")
+		} else {
+			return fmt.Errorf("Timeout trying to close stream")
+		}
+	}
+}
 
 // http.Hijacker interface
 // Review AB: Use own interface for stream hijack. It is not the same as a full connection hijack!
