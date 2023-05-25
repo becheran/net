@@ -153,6 +153,9 @@ type Server struct {
 	// so that we don't embed a Mutex in this struct, which will make the
 	// struct non-copyable, which might break some callers.
 	state *serverInternalState
+
+	// EnableConnectProtocol used for RFC 8441
+	EnableConnectProtocol bool
 }
 
 func (s *Server) initialConnRecvWindowSize() int32 {
@@ -167,6 +170,13 @@ func (s *Server) initialStreamRecvWindowSize() int32 {
 		return s.MaxUploadBufferPerStream
 	}
 	return 1 << 20
+}
+
+func (s *Server) enableConnectProtocol() int32 {
+	if s.EnableConnectProtocol {
+		return 1
+	}
+	return 0
 }
 
 func (s *Server) maxReadFrameSize() uint32 {
@@ -421,6 +431,7 @@ func (s *Server) ServeConn(c net.Conn, opts *ServeConnOpts) {
 		advMaxStreams:               s.maxConcurrentStreams(),
 		initialStreamSendWindowSize: initialWindowSize,
 		maxFrameSize:                initialMaxFrameSize,
+		enableConnectProtocol:       s.EnableConnectProtocol,
 		serveG:                      newGoroutineLock(),
 		pushEnabled:                 true,
 		sawClientPreface:            opts.SawClientPreface,
@@ -584,6 +595,7 @@ type serverConn struct {
 	maxClientStreamID           uint32 // max ever seen from client (odd), or 0 if there have been no client requests
 	maxPushPromiseID            uint32 // ID of the last push promise (even), or 0 if there have been no pushes
 	streams                     map[uint32]*stream
+	enableConnectProtocol       bool
 	initialStreamSendWindowSize int32
 	maxFrameSize                int32
 	peerMaxHeaderListSize       uint32            // zero means unknown (default)
@@ -901,6 +913,7 @@ func (sc *serverConn) serve() {
 			{SettingMaxHeaderListSize, sc.maxHeaderListSize()},
 			{SettingHeaderTableSize, sc.srv.maxDecoderHeaderTableSize()},
 			{SettingInitialWindowSize, uint32(sc.srv.initialStreamRecvWindowSize())},
+			{SettingEnableConnectProtocol, uint32(sc.srv.enableConnectProtocol())},
 		},
 	})
 	sc.unackedSettings++
@@ -2007,7 +2020,7 @@ func (sc *serverConn) processHeaders(f *MetaHeadersFrame) error {
 	if f.Truncated {
 		// Their header list was too long. Send a 431 error.
 		handler = handleHeaderListTooLong
-	} else if err := checkValidHTTP2RequestHeaders(req.Header); err != nil {
+	} else if err := checkValidHTTP2RequestHeaders(req.Header, sc.enableConnectProtocol); err != nil {
 		handler = new400Handler(err)
 	}
 
@@ -2142,11 +2155,15 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 		scheme:    f.PseudoValue("scheme"),
 		authority: f.PseudoValue("authority"),
 		path:      f.PseudoValue("path"),
+		protocol:  f.PseudoValue("protocol"),
 	}
 
 	isConnect := rp.method == "CONNECT"
 	if isConnect {
-		if rp.path != "" || rp.scheme != "" || rp.authority == "" {
+		if sc.enableConnectProtocol && rp.path == "" || rp.scheme == "" || rp.authority == "" {
+			// Follow RFC 8441
+			return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
+		} else if rp.protocol != "" || rp.path != "" || rp.scheme != "" || rp.authority == "" {
 			return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
 		}
 	} else if rp.method == "" || rp.path == "" || (rp.scheme != "https" && rp.scheme != "http") {
@@ -2194,9 +2211,9 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 }
 
 type requestParam struct {
-	method                  string
-	scheme, authority, path string
-	header                  http.Header
+	method                            string
+	scheme, authority, path, protocol string
+	header                            http.Header
 }
 
 func (sc *serverConn) newWriterAndRequestNoBody(st *stream, rp requestParam) (*responseWriter, *http.Request, error) {
@@ -2237,7 +2254,7 @@ func (sc *serverConn) newWriterAndRequestNoBody(st *stream, rp requestParam) (*r
 
 	var url_ *url.URL
 	var requestURI string
-	if rp.method == "CONNECT" {
+	if rp.method == "CONNECT" && rp.protocol == "" {
 		url_ = &url.URL{Host: rp.authority}
 		requestURI = rp.authority // mimic HTTP/1 server behavior
 	} else {
@@ -2247,6 +2264,12 @@ func (sc *serverConn) newWriterAndRequestNoBody(st *stream, rp requestParam) (*r
 			return nil, nil, sc.countError("bad_path", streamError(st.id, ErrCodeProtocol))
 		}
 		requestURI = rp.path
+	}
+
+	//handler must be aware - it will cause protocol error
+	if rp.method == "CONNECT" && rp.protocol != "" {
+		rp.header.Add("Connection", "upgrade")
+		rp.header.Add("Upgrade", rp.protocol)
 	}
 
 	body := &requestBody{
@@ -3024,7 +3047,7 @@ func (w *responseWriter) Push(target string, opts *http.PushOptions) error {
 			return fmt.Errorf("promised request headers cannot include %q", k)
 		}
 	}
-	if err := checkValidHTTP2RequestHeaders(opts.Header); err != nil {
+	if err := checkValidHTTP2RequestHeaders(opts.Header, false); err != nil {
 		return err
 	}
 
@@ -3180,8 +3203,12 @@ var connHeaders = []string{
 // checkValidHTTP2RequestHeaders checks whether h is a valid HTTP/2 request,
 // per RFC 7540 Section 8.1.2.2.
 // The returned error is reported to users.
-func checkValidHTTP2RequestHeaders(h http.Header) error {
+func checkValidHTTP2RequestHeaders(h http.Header, connectProtocolEnabled bool) error {
 	for _, k := range connHeaders {
+		//Conditionally allowed when connect protocol is enabled
+		if connectProtocolEnabled && (k == "Connection" || k == "Upgrade") {
+			continue
+		}
 		if _, ok := h[k]; ok {
 			return fmt.Errorf("request header %q is not valid in HTTP/2", k)
 		}
