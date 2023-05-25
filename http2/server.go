@@ -422,6 +422,7 @@ func (s *Server) ServeConn(c net.Conn, opts *ServeConnOpts) {
 		handler:                     opts.handler(),
 		streams:                     make(map[uint32]*stream),
 		readFrameCh:                 make(chan readFrameResult),
+		closeStreamChan:             make(chan *stream),
 		wantWriteFrameCh:            make(chan FrameWriteRequest, 8),
 		serveMsgCh:                  make(chan interface{}, 8),
 		wroteFrameCh:                make(chan frameWriteResult, 1), // buffered; one send in writeFrameAsync
@@ -569,6 +570,7 @@ type serverConn struct {
 	baseCtx          context.Context
 	framer           *Framer
 	doneServing      chan struct{}          // closed when serverConn.serve ends
+	closeStreamChan  chan *stream           //used to close active connection via closer interface
 	readFrameCh      chan readFrameResult   // written by serverConn.readFrames
 	wantWriteFrameCh chan FrameWriteRequest // from handlers -> serve
 	wroteFrameCh     chan frameWriteResult  // from writeFrameAsync -> serve, tickles more frame writes
@@ -1004,6 +1006,8 @@ func (sc *serverConn) serve() {
 			default:
 				panic(fmt.Sprintf("unexpected type %T", v))
 			}
+		case s := <-sc.closeStreamChan:
+			sc.closeStream(s, fmt.Errorf("stream closed via io.Closer interface"))
 		}
 
 		// If the peer is causing us to generate a lot of control frames,
@@ -2784,6 +2788,16 @@ func (w *responseWriter) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
+
+// http.Hijacker interface
+// Review AB: Use own interface for stream hijack. It is not the same as a full connection hijack!
+// Also note that golang http lib states the following in the http.Hijacker interface:
+// "The default ResponseWriter for HTTP/1.x connections supports
+// Hijacker, but HTTP/2 connections intentionally do not."
+func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return newHttp2StreamConnection(w), bufio.NewReadWriter(bufio.NewReader(nil), bufio.NewWriter(io.Discard)), nil
+}
+
 func (w *responseWriter) Flush() {
 	w.FlushError()
 }
@@ -3083,6 +3097,90 @@ func (w *responseWriter) Push(target string, opts *http.PushOptions) error {
 		errChanPool.Put(msg.done)
 		return err
 	}
+}
+
+type http2StreamConnection struct {
+	rw            *responseWriter
+	readDeadline  time.Time
+	writeDeadline time.Time
+}
+
+func newHttp2StreamConnection(w *responseWriter) net.Conn {
+	return &http2StreamConnection{
+		rw:            w,
+		readDeadline:  time.Now().Add(time.Hour * 24 * 365 * 20),
+		writeDeadline: time.Now().Add(time.Hour * 24 * 365 * 20),
+	}
+}
+
+func (c *http2StreamConnection) Read(b []byte) (n int, err error) {
+	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil || c.rw.rws.stream.state == stateIdle || c.rw.rws.stream.state == stateClosed {
+		return 0, fmt.Errorf("stream closed")
+	}
+
+	type res struct {
+		n   int
+		err error
+	}
+	done := make(chan res)
+
+	go func() {
+		n, err := c.rw.rws.stream.body.Read(b)
+		// TODO: Review AB. Routine leak in case of timeouts!
+		done <- res{n: n, err: err}
+	}()
+	t := time.NewTimer(c.readDeadline.Sub(time.Now()))
+	select {
+	case res := <-done:
+		return res.n, res.err
+	case <-t.C:
+		return 0, &net.OpError{Err: fmt.Errorf("timeout")}
+	}
+}
+
+func (c *http2StreamConnection) Write(b []byte) (n int, err error) {
+	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil || c.rw.rws.stream.state == stateIdle || c.rw.rws.stream.state == stateClosed {
+		return 0, fmt.Errorf("stream closed")
+	}
+	if err = c.rw.rws.conn.writeDataFromHandler(c.rw.rws.stream, b, false); err != nil {
+		c.rw.rws.dirty = true
+		return 0, err
+	}
+	return len(b), nil
+
+	// TODO timeouts!
+}
+
+func (c *http2StreamConnection) Close() error {
+	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil || c.rw.rws.stream.state == stateIdle || c.rw.rws.stream.state == stateClosed {
+		return fmt.Errorf("stream already closed")
+	}
+	c.rw.rws.conn.closeStream(c.rw.rws.stream, fmt.Errorf("Hijacked connection closed"))
+	return nil
+}
+
+func (c *http2StreamConnection) LocalAddr() net.Addr {
+	return c.rw.rws.conn.conn.LocalAddr()
+}
+
+func (c *http2StreamConnection) RemoteAddr() net.Addr {
+	return c.rw.rws.conn.conn.RemoteAddr()
+}
+
+func (c *http2StreamConnection) SetDeadline(t time.Time) error {
+	c.SetReadDeadline(t)
+	c.SetWriteDeadline(t)
+	return nil
+}
+
+func (c *http2StreamConnection) SetReadDeadline(t time.Time) error {
+	c.readDeadline = t
+	return nil
+}
+
+func (c *http2StreamConnection) SetWriteDeadline(t time.Time) error {
+	c.writeDeadline = t
+	return nil
 }
 
 type startPushRequest struct {
