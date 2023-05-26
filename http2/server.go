@@ -2164,10 +2164,13 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 
 	isConnect := rp.method == "CONNECT"
 	if isConnect {
-		if sc.enableConnectProtocol && rp.path == "" || rp.scheme == "" || rp.authority == "" {
-			// Follow RFC 8441
-			return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
-		} else if rp.protocol != "" || rp.path != "" || rp.scheme != "" || rp.authority == "" {
+		protocolError := false
+		if sc.enableConnectProtocol { // Follow RFC 8441
+			protocolError = rp.path == "" || rp.scheme == "" || rp.authority == ""
+		} else {
+			protocolError = rp.protocol != "" || rp.path != "" || rp.scheme != "" || rp.authority == ""
+		}
+		if protocolError {
 			return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
 		}
 	} else if rp.method == "" || rp.path == "" || (rp.scheme != "https" && rp.scheme != "http") {
