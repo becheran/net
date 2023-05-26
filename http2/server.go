@@ -3148,7 +3148,8 @@ func (c *http2StreamConnection) Read(b []byte) (n int, err error) {
 	done := make(chan res)
 
 	go func() {
-		n, err := c.rw.rws.stream.body.Read(b)
+		// Need to read from body. Otherwise the h2 window update frames would not be send
+		n, err := c.rw.rws.req.Body.Read(b)
 		// TODO: Review AB. Routine leak in case of timeouts!
 		done <- res{n: n, err: err}
 	}()
