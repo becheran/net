@@ -3120,6 +3120,15 @@ type Http2Stream interface {
 	StreamId() uint32
 }
 
+// The StreamHijacker interface is implemented by responseWriter that allow
+// an HTTP handler to take over the stream.
+type StreamHijacker interface {
+	http.Hijacker
+	// HijackStream returns the hijacked stream inside a http2 connection
+	// Will return an error if hijacking is currently not possible
+	HijackStream() (Http2Stream, error)
+}
+
 // Hijack the http2 stream
 func (w *responseWriter) HijackStream() (Http2Stream, error) {
 	if w.rws == nil || w.rws.stream == nil {
