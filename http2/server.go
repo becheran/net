@@ -1640,6 +1640,7 @@ func (sc *serverConn) processResetStream(f *RSTStreamFrame) error {
 func (sc *serverConn) closeStream(st *stream, err error) {
 	sc.serveG.check()
 	if st.state == stateIdle || st.state == stateClosed {
+		return
 		panic(fmt.Sprintf("invariant; can't close stream in state %v", st.state))
 	}
 	st.state = stateClosed
@@ -3123,7 +3124,6 @@ type Http2Stream interface {
 // The StreamHijacker interface is implemented by responseWriter that allow
 // an HTTP handler to take over the stream.
 type StreamHijacker interface {
-	http.Hijacker
 	// HijackStream returns the hijacked stream inside a http2 connection
 	// Will return an error if hijacking is currently not possible
 	HijackStream() (Http2Stream, error)
