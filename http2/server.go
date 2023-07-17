@@ -2812,15 +2812,6 @@ func (w *responseWriter) Close() error {
 	}
 }
 
-// http.Hijacker interface
-// Review AB: Use own interface for stream hijack. It is not the same as a full connection hijack!
-// Also note that golang http lib states the following in the http.Hijacker interface:
-// "The default ResponseWriter for HTTP/1.x connections supports
-// Hijacker, but HTTP/2 connections intentionally do not."
-func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return newHttp2StreamConnection(w), bufio.NewReadWriter(bufio.NewReader(nil), bufio.NewWriter(io.Discard)), nil
-}
-
 func (w *responseWriter) Flush() {
 	w.FlushError()
 }
@@ -3122,18 +3113,40 @@ func (w *responseWriter) Push(target string, opts *http.PushOptions) error {
 	}
 }
 
+// Http2Stream representation
+type Http2Stream interface {
+	net.Conn
+	// Stream id returns the identifier of the current stream
+	StreamId() uint32
+}
+
+// Hijack the http2 stream
+func (w *responseWriter) HijackStream() (Http2Stream, error) {
+	if w.rws == nil || w.rws.stream == nil {
+		return nil, fmt.Errorf("stream is currently not available")
+	}
+	return newHttp2StreamConnection(w), nil
+}
+
 type http2StreamConnection struct {
 	rw            *responseWriter
 	readDeadline  time.Time
 	writeDeadline time.Time
 }
 
-func newHttp2StreamConnection(w *responseWriter) net.Conn {
+func newHttp2StreamConnection(w *responseWriter) *http2StreamConnection {
 	return &http2StreamConnection{
 		rw:            w,
 		readDeadline:  time.Now().Add(time.Hour * 24 * 365 * 20),
 		writeDeadline: time.Now().Add(time.Hour * 24 * 365 * 20),
 	}
+}
+
+func (c *http2StreamConnection) StreamId() uint32 {
+	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil {
+		return 0
+	}
+	return c.rw.rws.stream.id
 }
 
 func (c *http2StreamConnection) Read(b []byte) (n int, err error) {
