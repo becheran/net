@@ -4756,3 +4756,43 @@ func TestServerWriteDoesNotRetainBufferAfterServerClose(t *testing.T) {
 	st.ts.Config.Close()
 	<-donec
 }
+
+func TestHijackStreamReadWithWindowUpdate(t *testing.T) {
+	fakeData := bytes.Repeat([]byte("a"), 1<<21)
+
+	donec := make(chan struct{}, 1)
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		donec <- struct{}{}
+		defer close(donec)
+
+		hijacker, ok := w.(StreamHijacker)
+		if !ok {
+			t.FailNow()
+		}
+		conn, err := hijacker.HijackStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(fakeData) != string(data) {
+			t.Fatal("Expected read bytes to be the same")
+		}
+	}, optOnlyServer)
+	defer st.Close()
+
+	tr := &Transport{TLSClientConfig: tlsConfigInsecure}
+	defer tr.CloseIdleConnections()
+
+	req, _ := http.NewRequest("GET", st.ts.URL, bytes.NewReader(fakeData))
+	res, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	<-donec
+	st.ts.Config.Close()
+	<-donec
+}
