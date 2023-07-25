@@ -4796,3 +4796,61 @@ func TestHijackStreamReadWithWindowUpdate(t *testing.T) {
 	st.ts.Config.Close()
 	<-donec
 }
+
+func TestCloseStreamNoBody(t *testing.T) {
+	// try multiple times to test race condition
+	for i := 0; i < 100; i++ {
+		closeStream(t, nil)
+	}
+}
+
+func TestCloseStreamLargeBody(t *testing.T) {
+	// try multiple times to test race condition
+	for i := 0; i < 100; i++ {
+		closeStream(t, infReader{})
+	}
+}
+
+type infReader struct{}
+
+func (r infReader) Read(b []byte) (int, error) {
+	for i := range b {
+		b[i] = 'A'
+	}
+	return len(b), nil
+}
+
+func closeStream(t *testing.T, body io.Reader) {
+	donec := make(chan struct{}, 1)
+
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		donec <- struct{}{}
+		defer close(donec)
+
+		closer, ok := w.(io.Closer)
+		if !ok {
+			t.FailNow()
+		}
+
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}, optOnlyServer)
+	defer st.Close()
+
+	tr := &Transport{TLSClientConfig: tlsConfigInsecure}
+	defer tr.CloseIdleConnections()
+
+	req, _ := http.NewRequest("GET", st.ts.URL, body)
+	res, err := tr.RoundTrip(req)
+	if streamErr, ok := err.(StreamError); ok {
+		if streamErr.Code != ErrCodeStreamClosed {
+			t.Fatalf("Expected ErrCodeStreamClosed, but got %s", streamErr.Code)
+		}
+	} else {
+		t.Fatalf("Expected stream error, but got %s. Res: %v", err, res)
+	}
+	<-donec
+	st.ts.Config.Close()
+	<-donec
+}

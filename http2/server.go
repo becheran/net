@@ -1007,7 +1007,9 @@ func (sc *serverConn) serve() {
 				panic(fmt.Sprintf("unexpected type %T", v))
 			}
 		case s := <-sc.closeStreamChan:
-			sc.closeStream(s, fmt.Errorf("stream closed via io.Closer interface"))
+			if err := sc.framer.WriteRSTStream(s.id, ErrCodeStreamClosed); err != nil {
+				panic(fmt.Sprintf("unexpected err while trying to close stream. %s", err))
+			}
 		}
 
 		// If the peer is causing us to generate a lot of control frames,
@@ -1640,7 +1642,6 @@ func (sc *serverConn) processResetStream(f *RSTStreamFrame) error {
 func (sc *serverConn) closeStream(st *stream, err error) {
 	sc.serveG.check()
 	if st.state == stateIdle || st.state == stateClosed {
-		return
 		panic(fmt.Sprintf("invariant; can't close stream in state %v", st.state))
 	}
 	st.state = stateClosed
@@ -2792,19 +2793,18 @@ func (w *responseWriter) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
-// io.Closer interface
-// TODO: review AB: Should better not use Closer interface.
-// Unclear what this means? In our case it closes the stream, but it could have been the connection itself?
+// Close the underlying stream with RST package.
+// Will return an error if already closed or close takes longer than 10 seconds
 func (w *responseWriter) Close() error {
-	if w == nil || w.rws == nil || w.rws.stream == nil || w.rws.stream.state == stateIdle || w.rws.stream.state == stateClosed {
+	if w == nil || w.rws == nil || w.rws.stream == nil || w.rws.stream.state == stateIdle || w.rws.stream.state == stateClosed || w.rws.conn == nil {
 		return fmt.Errorf("stream already closed")
 	}
-	timeout := time.NewTimer(time.Second * 10)
-	defer timeout.Stop()
+	// Need to set here, otherwise the default response will be send once the handler is left.
+	w.rws.sentHeader = true
 	select {
 	case w.rws.conn.closeStreamChan <- w.rws.stream:
 		return nil
-	case <-timeout.C:
+	case <-time.After(time.Second * 10):
 		if w == nil || w.rws == nil || w.rws.stream == nil || w.rws.stream.state == stateIdle || w.rws.stream.state == stateClosed {
 			return fmt.Errorf("stream already closed")
 		} else {
@@ -3198,11 +3198,10 @@ func (c *http2StreamConnection) Write(b []byte) (n int, err error) {
 }
 
 func (c *http2StreamConnection) Close() error {
-	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil || c.rw.rws.stream.state == stateIdle || c.rw.rws.stream.state == stateClosed {
+	if c.rw == nil {
 		return fmt.Errorf("stream already closed")
 	}
-	c.rw.rws.conn.closeStream(c.rw.rws.stream, fmt.Errorf("Hijacked connection closed"))
-	return nil
+	return c.rw.Close()
 }
 
 func (c *http2StreamConnection) LocalAddr() net.Addr {
