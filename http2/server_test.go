@@ -4854,3 +4854,64 @@ func closeStream(t *testing.T, body io.Reader) {
 	st.ts.Config.Close()
 	<-donec
 }
+
+func TestCloseStreamInSeries(t *testing.T) {
+	donec := make(chan struct{}, 1)
+
+	const (
+		ReqA = "GET"
+		ReqB = "POST"
+	)
+	var closers []io.Closer
+
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		if closer, ok := w.(io.Closer); ok {
+			closers = append(closers, closer)
+		} else {
+			t.FailNow()
+		}
+		donec <- struct{}{}
+		io.ReadAll(r.Body)
+	}, optOnlyServer)
+	defer st.Close()
+
+	tr := &Transport{TLSClientConfig: tlsConfigInsecure}
+	defer tr.CloseIdleConnections()
+
+	resp := make(chan string)
+	go func() {
+		req, _ := http.NewRequest(ReqA, st.ts.URL, infReader{})
+		tr.RoundTrip(req)
+		resp <- ReqA
+	}()
+	<-donec
+	go func() {
+		req, _ := http.NewRequest(ReqB, st.ts.URL, infReader{})
+		tr.RoundTrip(req)
+		resp <- ReqB
+	}()
+	<-donec
+
+	waitForCloser := func(closer io.Closer, expected string) error {
+		if err := closer.Close(); err != nil {
+			return err
+		}
+		select {
+		case result := <-resp:
+			if result != expected {
+				return fmt.Errorf("Expected %s, but got %s", expected, result)
+			}
+		case <-time.After(time.Second):
+			return fmt.Errorf("Timeout waiting for result")
+		}
+		return nil
+	}
+
+	if err := waitForCloser(closers[0], ReqA); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := waitForCloser(closers[1], ReqB); err != nil {
+		t.Fatal(err)
+	}
+}

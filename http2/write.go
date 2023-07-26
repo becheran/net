@@ -82,6 +82,19 @@ func (s writeSettings) writeFrame(ctx writeContext) error {
 	return ctx.Framer().WriteSettings([]Setting(s)...)
 }
 
+type writeRST struct {
+	maxStreamID uint32
+	code        ErrCode
+}
+
+func (p *writeRST) writeFrame(ctx writeContext) error {
+	err := ctx.Framer().WriteRSTStream(p.maxStreamID, p.code)
+	ctx.Flush() // ignore error: we're hanging up on them anyway
+	return err
+}
+
+func (*writeRST) staysWithinBuffer(max int) bool { return false } // flushes
+
 type writeGoAway struct {
 	maxStreamID uint32
 	code        ErrCode

@@ -422,7 +422,7 @@ func (s *Server) ServeConn(c net.Conn, opts *ServeConnOpts) {
 		handler:                     opts.handler(),
 		streams:                     make(map[uint32]*stream),
 		readFrameCh:                 make(chan readFrameResult),
-		closeStreamChan:             make(chan *stream),
+		closeStreamCh:               make(chan uint32),
 		wantWriteFrameCh:            make(chan FrameWriteRequest, 8),
 		serveMsgCh:                  make(chan interface{}, 8),
 		wroteFrameCh:                make(chan frameWriteResult, 1), // buffered; one send in writeFrameAsync
@@ -570,7 +570,7 @@ type serverConn struct {
 	baseCtx          context.Context
 	framer           *Framer
 	doneServing      chan struct{}          // closed when serverConn.serve ends
-	closeStreamChan  chan *stream           //used to close active connection via closer interface
+	closeStreamCh    chan uint32            // used to close active connection via closer interface. Contains stream iD
 	readFrameCh      chan readFrameResult   // written by serverConn.readFrames
 	wantWriteFrameCh chan FrameWriteRequest // from handlers -> serve
 	wroteFrameCh     chan frameWriteResult  // from writeFrameAsync -> serve, tickles more frame writes
@@ -1006,10 +1006,8 @@ func (sc *serverConn) serve() {
 			default:
 				panic(fmt.Sprintf("unexpected type %T", v))
 			}
-		case s := <-sc.closeStreamChan:
-			if err := sc.framer.WriteRSTStream(s.id, ErrCodeStreamClosed); err != nil {
-				panic(fmt.Sprintf("unexpected err while trying to close stream. %s", err))
-			}
+		case streamID := <-sc.closeStreamCh:
+			sc.writeFrame(FrameWriteRequest{write: &writeRST{streamID, ErrCodeStreamClosed}})
 		}
 
 		// If the peer is causing us to generate a lot of control frames,
@@ -2528,6 +2526,7 @@ type responseWriterState struct {
 	sentHeader    bool        // have we sent the header frame?
 	handlerDone   bool        // handler has finished
 	dirty         bool        // a Write failed; don't reuse this responseWriterState
+	hijacked      bool        // if stream hijacker was used to hijack connection or was closed via closer interface
 
 	sentContentLen int64 // non-zero if handler set a Content-Length header
 	wroteBytes     int64
@@ -2581,7 +2580,7 @@ func (rws *responseWriterState) declareTrailer(k string) {
 // writeChunk is also responsible (on the first chunk) for sending the
 // HEADER response.
 func (rws *responseWriterState) writeChunk(p []byte) (n int, err error) {
-	if !rws.wroteHeader {
+	if !rws.wroteHeader && !rws.hijacked {
 		rws.writeHeader(200)
 	}
 
@@ -2800,9 +2799,9 @@ func (w *responseWriter) Close() error {
 		return fmt.Errorf("stream already closed")
 	}
 	// Need to set here, otherwise the default response will be send once the handler is left.
-	w.rws.sentHeader = true
+	w.rws.hijacked = true
 	select {
-	case w.rws.conn.closeStreamChan <- w.rws.stream:
+	case w.rws.conn.closeStreamCh <- w.rws.stream.id:
 		return nil
 	case <-time.After(time.Second * 10):
 		if w == nil || w.rws == nil || w.rws.stream == nil || w.rws.stream.state == stateIdle || w.rws.stream.state == stateClosed {
