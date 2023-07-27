@@ -4915,3 +4915,42 @@ func TestCloseStreamInSeries(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHijackStreamWriteIgnore(t *testing.T) {
+	donec := make(chan struct{}, 1)
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		donec <- struct{}{}
+		defer close(donec)
+
+		hijacker, ok := w.(StreamHijacker)
+		if !ok {
+			t.FailNow()
+		}
+		_, err := hijacker.HijackStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte("foo"))
+		w.WriteHeader(42)
+	}, optOnlyServer)
+	defer st.Close()
+
+	tr := &Transport{TLSClientConfig: tlsConfigInsecure}
+	defer tr.CloseIdleConnections()
+
+	req, _ := http.NewRequest("GET", st.ts.URL, nil)
+	res, err := tr.RoundTrip(req)
+	if err, ok := err.(StreamError); !ok {
+		t.Fatalf("Expected round trip to fail with stream error, but got %s", err)
+	}
+	if res != nil {
+		body, _ := ioutil.ReadAll(res.Body)
+		res.Body.Close()
+		if len(body) > 0 {
+			t.Fatalf("Expected empty body, but got `%s`", body)
+		}
+	}
+	<-donec
+	st.ts.Config.Close()
+	<-donec
+}

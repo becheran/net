@@ -2901,6 +2901,10 @@ func (rws *responseWriterState) writeHeader(code int) {
 	if rws.wroteHeader {
 		return
 	}
+	if rws.hijacked {
+		rws.conn.logf("http2: response.WriteHeader on hijacked connection")
+		return
+	}
 
 	checkWriteHeaderCode(code)
 
@@ -2967,6 +2971,10 @@ func (w *responseWriter) write(lenData int, dataB []byte, dataS string) (n int, 
 	rws := w.rws
 	if rws == nil {
 		panic("Write called after Handler finished")
+	}
+	if rws.hijacked {
+		rws.conn.logf("http2: response.Write on hijacked connection")
+		return
 	}
 	if !rws.wroteHeader {
 		w.WriteHeader(200)
@@ -3133,6 +3141,7 @@ func (w *responseWriter) HijackStream() (Http2Stream, error) {
 	if w.rws == nil || w.rws.stream == nil {
 		return nil, fmt.Errorf("stream is currently not available")
 	}
+	w.rws.hijacked = true
 	return newHttp2StreamConnection(w), nil
 }
 
