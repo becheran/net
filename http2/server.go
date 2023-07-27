@@ -3142,21 +3142,13 @@ func (w *responseWriter) HijackStream() (Http2Stream, error) {
 		return nil, fmt.Errorf("stream is currently not available")
 	}
 	w.rws.hijacked = true
-	return newHttp2StreamConnection(w), nil
+	return &http2StreamConnection{
+		rw: w,
+	}, nil
 }
 
 type http2StreamConnection struct {
-	rw            *responseWriter
-	readDeadline  time.Time
-	writeDeadline time.Time
-}
-
-func newHttp2StreamConnection(w *responseWriter) *http2StreamConnection {
-	return &http2StreamConnection{
-		rw:            w,
-		readDeadline:  time.Now().Add(time.Hour * 24 * 365 * 20),
-		writeDeadline: time.Now().Add(time.Hour * 24 * 365 * 20),
-	}
+	rw *responseWriter
 }
 
 func (c *http2StreamConnection) StreamId() uint32 {
@@ -3167,29 +3159,12 @@ func (c *http2StreamConnection) StreamId() uint32 {
 }
 
 func (c *http2StreamConnection) Read(b []byte) (n int, err error) {
-	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil || c.rw.rws.stream.state == stateIdle || c.rw.rws.stream.state == stateClosed {
+	if c.rw == nil || c.rw.rws == nil || c.rw.rws.stream == nil || c.rw.rws.req == nil || c.rw.rws.req.Body == nil || c.rw.rws.stream.state == stateIdle || c.rw.rws.stream.state == stateClosed {
 		return 0, fmt.Errorf("stream closed")
 	}
 
-	type res struct {
-		n   int
-		err error
-	}
-	done := make(chan res)
-
-	go func() {
-		// Need to read from body. Otherwise the h2 window update frames would not be send
-		n, err := c.rw.rws.req.Body.Read(b)
-		// TODO: Review AB. Routine leak in case of timeouts!
-		done <- res{n: n, err: err}
-	}()
-	t := time.NewTimer(c.readDeadline.Sub(time.Now()))
-	select {
-	case res := <-done:
-		return res.n, res.err
-	case <-t.C:
-		return 0, &net.OpError{Err: fmt.Errorf("timeout")}
-	}
+	// Need to read from body. Otherwise the h2 window update frames would not be send
+	return c.rw.rws.req.Body.Read(b)
 }
 
 func (c *http2StreamConnection) Write(b []byte) (n int, err error) {
@@ -3201,8 +3176,6 @@ func (c *http2StreamConnection) Write(b []byte) (n int, err error) {
 		return 0, err
 	}
 	return len(b), nil
-
-	// TODO timeouts!
 }
 
 func (c *http2StreamConnection) Close() error {
@@ -3220,20 +3193,22 @@ func (c *http2StreamConnection) RemoteAddr() net.Addr {
 	return c.rw.rws.conn.conn.RemoteAddr()
 }
 
-func (c *http2StreamConnection) SetDeadline(t time.Time) error {
-	c.SetReadDeadline(t)
-	c.SetWriteDeadline(t)
+func (c *http2StreamConnection) SetDeadline(deadline time.Time) error {
+	if err := c.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	if err := c.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (c *http2StreamConnection) SetReadDeadline(t time.Time) error {
-	c.readDeadline = t
-	return nil
+func (c *http2StreamConnection) SetReadDeadline(deadline time.Time) error {
+	return c.rw.SetReadDeadline(deadline)
 }
 
-func (c *http2StreamConnection) SetWriteDeadline(t time.Time) error {
-	c.writeDeadline = t
-	return nil
+func (c *http2StreamConnection) SetWriteDeadline(deadline time.Time) error {
+	return c.rw.SetReadDeadline(deadline)
 }
 
 type startPushRequest struct {

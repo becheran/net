@@ -4954,3 +4954,40 @@ func TestHijackStreamWriteIgnore(t *testing.T) {
 	st.ts.Config.Close()
 	<-donec
 }
+
+func TestHijackStreamTimeout(t *testing.T) {
+	donec := make(chan struct{}, 1)
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+		donec <- struct{}{}
+		defer close(donec)
+
+		hijacker, ok := w.(StreamHijacker)
+		if !ok {
+			t.FailNow()
+		}
+		stream, err := hijacker.HijackStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.SetDeadline(time.Now().Add(time.Millisecond * 30)); err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.ReadAll(stream)
+		if !os.IsTimeout(errTimeout) {
+			t.Fatalf("Expected timeout error, but got %s", err)
+		}
+	}, optOnlyServer)
+	defer st.Close()
+
+	tr := &Transport{TLSClientConfig: tlsConfigInsecure}
+	defer tr.CloseIdleConnections()
+
+	req, _ := http.NewRequest("GET", st.ts.URL, infReader{})
+	_, err := tr.RoundTrip(req)
+	if err, ok := err.(StreamError); !ok {
+		t.Fatalf("Expected round trip to fail with stream error, but got %s", err)
+	}
+	<-donec
+	st.ts.Config.Close()
+	<-donec
+}
