@@ -4765,6 +4765,8 @@ func TestHijackStreamReadWithWindowUpdate(t *testing.T) {
 		donec <- struct{}{}
 		defer close(donec)
 
+		w.WriteHeader(200)
+
 		hijacker, ok := w.(StreamHijacker)
 		if !ok {
 			t.FailNow()
