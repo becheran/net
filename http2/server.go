@@ -2901,10 +2901,6 @@ func (rws *responseWriterState) writeHeader(code int) {
 	if rws.wroteHeader {
 		return
 	}
-	if rws.hijacked {
-		rws.conn.logf("http2: response.WriteHeader on hijacked connection")
-		return
-	}
 
 	checkWriteHeaderCode(code)
 
@@ -2974,7 +2970,7 @@ func (w *responseWriter) write(lenData int, dataB []byte, dataS string) (n int, 
 	}
 	if rws.hijacked {
 		rws.conn.logf("http2: response.Write on hijacked connection")
-		return
+		return 0, fmt.Errorf("write on hijacked connection")
 	}
 	if !rws.wroteHeader {
 		w.WriteHeader(200)
@@ -3133,6 +3129,9 @@ type Http2Stream interface {
 type StreamHijacker interface {
 	// HijackStream returns the hijacked stream inside a http2 connection
 	// Will return an error if hijacking is currently not possible
+	//
+	// On a hijacked stream, only WriteHeader() may be performed on the response writer.
+	// Write() will cause an error
 	HijackStream() (Http2Stream, error)
 }
 

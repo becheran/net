@@ -4932,7 +4932,10 @@ func TestHijackStreamWriteIgnore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		w.Write([]byte("foo"))
+		_, err = w.Write([]byte("foo"))
+		if err == nil || err.Error() != "write on hijacked connection" {
+			t.Fatalf("Expected err to contain 'write on hijacked connection'. %s", err)
+		}
 		w.WriteHeader(42)
 	}, optOnlyServer)
 	defer st.Close()
